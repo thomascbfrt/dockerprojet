@@ -1,0 +1,19 @@
+# Secrets (ne jamais commiter!)
+secrets/*.txt
+
+# Volumes Docker
+volumes/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

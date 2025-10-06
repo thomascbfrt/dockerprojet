@@ -1,0 +1,24 @@
+FROM python:3.11-alpine
+
+WORKDIR /app
+
+# Installer les dépendances système pour mysqlclient
+RUN apk add --no-cache mariadb-connector-c-dev gcc musl-dev
+
+# Copier les requirements
+COPY requirements.txt .
+
+# Installer les dépendances Python
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copier le code source
+COPY . .
+
+# Précompiler les fichiers Python
+RUN python -m compileall .
+
+# Exposer le port
+EXPOSE 5001
+
+# Lancer le serveur
+CMD ["python", "-u", "-m", "MyRamesServer", "-c", "/app/config.py"]

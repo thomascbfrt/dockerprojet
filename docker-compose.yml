@@ -1,0 +1,219 @@
+version: '3.8'
+
+services:
+  # Base de données de production (MariaDB)
+  sqldatabase:
+    image: mariadb:11
+    container_name: logistico-sqldatabase
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+      MYSQL_DATABASE: myrames-prod-db
+      MYSQL_USER: mariaUsr
+      MYSQL_PASSWORD_FILE: /run/secrets/db_user_password
+    volumes:
+      - sql_data:/var/lib/mysql
+      - ./init-sql:/docker-entrypoint-initdb.d:ro
+    networks:
+      - sql_network
+    secrets:
+      - db_root_password
+      - db_user_password
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  # Base de données d'historique (MongoDB)
+  nosqldatabase:
+    image: mongo:6.0
+    container_name: logistico-nosqldatabase
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: mongoUsr
+      MONGO_INITDB_ROOT_PASSWORD_FILE: /run/secrets/mongo_root_password
+      MONGO_INITDB_DATABASE: history-db
+    volumes:
+      - nosql_data:/data/db
+    networks:
+      - nosql_network
+    secrets:
+      - mongo_root_password
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  # Serveur de messages (RabbitMQ)
+  broker:
+    image: rabbitmq:3.12-management-alpine
+    container_name: logistico-broker
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: rabbitmqUsr
+      RABBITMQ_DEFAULT_PASS: rabbitSecurePass123
+    volumes:
+      - ./rabbitmq-config/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+    networks:
+      - broker_network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  # API REST (Python Flask)
+  restapi:
+    build:
+      context: ./LogisticoTrain_codebase/RESTApi
+      dockerfile: ../../Dockerfile.restapi
+    container_name: logistico-restapi
+    restart: unless-stopped
+    environment:
+      PYTHONUNBUFFERED: 1
+    volumes:
+      - ./config/restapi-config.py:/app/config.py:ro
+    networks:
+      - sql_network
+      - nosql_network
+      - api_network
+    depends_on:
+      sqldatabase:
+        condition: service_healthy
+      nosqldatabase:
+        condition: service_healthy
+    secrets:
+      - restapi_config
+
+  # API Temps Réel (Spring Java)
+  wsapi:
+    image: maven:3.9-eclipse-temurin-21-alpine
+    container_name: logistico-wsapi
+    restart: unless-stopped
+    working_dir: /app
+    command: mvn spring-boot:run
+    volumes:
+      - ./LogisticoTrain_codebase/RealtimeAPI:/app
+      - maven_cache:/root/.m2
+      - wsapi_target:/app/target
+      - ./config/wsapi-application.properties:/app/src/main/resources/application.properties:ro
+    networks:
+      - sql_network
+      - nosql_network
+      - broker_network
+      - api_network
+    depends_on:
+      sqldatabase:
+        condition: service_healthy
+      nosqldatabase:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+    secrets:
+      - wsapi_config
+
+  # Serveur HTTP Front (Nginx)
+  front:
+    image: nginx:alpine
+    container_name: logistico-front
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./vendorConfigurations/nginx.conf:/etc/nginx/nginx.conf:ro
+      - webapp_build:/usr/share/nginx/html:ro
+    networks:
+      - api_network
+    depends_on:
+      - restapi
+      - wsapi
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  # Builder de l'application web (Node.js)
+  webapp:
+    image: node:22-alpine
+    container_name: logistico-webapp
+    working_dir: /app
+    command: sh -c "apk add --no-cache python3 py3-setuptools make g++ && npm ci && npm run build"
+    volumes:
+      - ./LogisticoTrain_codebase/app:/app
+      - webapp_build:/app/build
+    network_mode: bridge
+    profiles:
+      - build
+
+  # PHPMyAdmin (outil de dev)
+  phpmyadmin:
+    image: phpmyadmin:latest
+    container_name: logistico-phpmyadmin
+    environment:
+      PMA_HOST: sqldatabase
+      PMA_USER: mariaUsr
+      PMA_PASSWORD_FILE: /run/secrets/db_user_password
+    ports:
+      - "127.0.0.1:8081:80"
+    networks:
+      - sql_network
+    depends_on:
+      - sqldatabase
+    secrets:
+      - db_user_password
+    profiles:
+      - dev-tool
+
+  # Mongo Express (outil de dev)
+  mongo-express:
+    image: mongo-express:latest
+    container_name: logistico-mongo-express
+    environment:
+      ME_CONFIG_MONGODB_SERVER: nosqldatabase
+      ME_CONFIG_MONGODB_ADMINUSERNAME: mongoUsr
+      ME_CONFIG_MONGODB_ADMINPASSWORD_FILE: /run/secrets/mongo_root_password
+      ME_CONFIG_BASICAUTH: "false"
+    ports:
+      - "127.0.0.1:8082:8081"
+    networks:
+      - nosql_network
+    depends_on:
+      - nosqldatabase
+    secrets:
+      - mongo_root_password
+    profiles:
+      - dev-tool
+
+networks:
+  sql_network:
+    driver: bridge
+  nosql_network:
+    driver: bridge
+  broker_network:
+    driver: bridge
+  api_network:
+    driver: bridge
+
+volumes:
+  sql_data:
+  nosql_data:
+  maven_cache:
+  wsapi_target:
+  webapp_build:
+
+secrets:
+  db_root_password:
+    file: ./secrets/db_root_password.txt
+  db_user_password:
+    file: ./secrets/db_user_password.txt
+  mongo_root_password:
+    file: ./secrets/mongo_root_password.txt
+  rabbitmq_password:
+    file: ./secrets/rabbitmq_password.txt
+  restapi_config:
+    file: ./config/restapi-config.py
+  wsapi_config:
+    file: ./config/wsapi-application.properties
